@@ -24,12 +24,14 @@ class ReviewerIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     topics: TopicInput = ""
     capacity: int = Field(default=3, ge=0, le=50)
+    institution: str | None = Field(default=None, max_length=100)
 
 
 class ReviewerPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     topics: TopicInput | None = None
     capacity: int | None = Field(default=None, ge=0, le=50)
+    institution: str | None = Field(default=None, max_length=100)
 
 
 class ConflictIn(BaseModel):
@@ -42,6 +44,10 @@ class SettingsIn(BaseModel):
     default_capacity: int | None = Field(default=None, ge=0, le=50)
     mismatch_weight: int | None = Field(default=None, ge=0, le=100000)
     load_weight: int | None = Field(default=None, ge=0, le=100000)
+    max_same_institution: int | None = Field(
+        default=None, ge=0, le=20,
+        description="每篇稿件同机构评审人上限；0 表示关闭机构多样性约束",
+    )
 
 
 class LockIn(BaseModel):

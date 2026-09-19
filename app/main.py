@@ -15,7 +15,15 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db
-from .db import get_conn, get_setting, normalize_topics, seed_demo_data, set_setting, transaction
+from .db import (
+    get_conn,
+    get_setting,
+    normalize_institution,
+    normalize_topics,
+    seed_demo_data,
+    set_setting,
+    transaction,
+)
 from .schemas import (
     ConflictIn,
     LockIn,
@@ -25,7 +33,7 @@ from .schemas import (
     ReviewerPatch,
     SettingsIn,
 )
-from .solver import solve
+from .solver import precheck_new_lock, solve
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -53,7 +61,8 @@ def build_state(conn: sqlite3.Connection) -> dict:
     def load_reviewers():
         return [
             {"id": r["id"], "name": r["name"],
-             "topics": json.loads(r["topics"]), "capacity": r["capacity"]}
+             "topics": json.loads(r["topics"]), "capacity": r["capacity"],
+             "institution": r["institution"]}
             for r in conn.execute("SELECT * FROM reviewers ORDER BY id").fetchall()
         ]
 
@@ -95,6 +104,7 @@ def build_state(conn: sqlite3.Connection) -> dict:
             "default_capacity": get_setting(conn, "default_capacity"),
             "mismatch_weight": get_setting(conn, "mismatch_weight"),
             "load_weight": get_setting(conn, "load_weight"),
+            "max_same_institution": get_setting(conn, "max_same_institution"),
         },
         "manuscripts": ms_list,
         "reviewers": rv_list,
@@ -163,10 +173,11 @@ def delete_manuscript(m_id: int, conn=Depends(get_conn)):
 def create_reviewer(body: ReviewerIn, conn=Depends(get_conn)):
     with transaction(conn):
         cur = conn.execute(
-            "INSERT INTO reviewers(name, topics, capacity) VALUES (?, ?, ?)",
+            "INSERT INTO reviewers(name, topics, capacity, institution) VALUES (?, ?, ?, ?)",
             (body.name.strip(),
              json.dumps(normalize_topics(body.topics), ensure_ascii=False),
-             body.capacity),
+             body.capacity,
+             normalize_institution(body.institution)),
         )
     return build_state(conn) | {"created_id": cur.lastrowid}
 
@@ -184,6 +195,9 @@ def update_reviewer(r_id: int, body: ReviewerPatch, conn=Depends(get_conn)):
     if body.capacity is not None:
         fields.append("capacity = ?")
         params.append(body.capacity)
+    if "institution" in body.model_fields_set:
+        fields.append("institution = ?")
+        params.append(normalize_institution(body.institution))
     if not fields:
         raise HTTPException(status_code=400, detail="没有需要更新的字段")
     params.append(r_id)
@@ -261,25 +275,11 @@ def toggle_lock(body: LockIn, conn=Depends(get_conn)):
     if body.locked:
         if is_conflict:
             raise HTTPException(status_code=409, detail="存在作者冲突的分配不能锁定。")
-        req = conn.execute(
-            "SELECT required_reviews FROM manuscripts WHERE id = ?",
-            (body.manuscript_id,),
-        ).fetchone()["required_reviews"]
-        locked_n = conn.execute(
-            "SELECT COUNT(*) AS c FROM assignments WHERE m_id = ? AND locked = 1",
-            (body.manuscript_id,),
-        ).fetchone()["c"]
-        existing = conn.execute(
-            "SELECT locked FROM assignments WHERE m_id = ? AND r_id = ?",
-            (body.manuscript_id, body.reviewer_id),
-        ).fetchone()
-        # 已存在的行只是被转为锁定（不增加人数）；否则新增一把锁会占用一个名额
-        if existing is None and locked_n >= req:
-            raise HTTPException(
-                status_code=409,
-                detail=f"该稿件最多需要 {req} 名评审，已锁定 {locked_n} 人，"
-                       f"再锁定一名新评审人将超出需求；请先解锁一把锁。",
-            )
+        # 硬性校验：新增锁定不得超过稿件需求，也不得使同机构锁定数超过上限
+        try:
+            precheck_new_lock(conn, body.manuscript_id, body.reviewer_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         with transaction(conn):
             conn.execute(
                 "INSERT INTO assignments(m_id, r_id, locked) VALUES (?, ?, 1) "

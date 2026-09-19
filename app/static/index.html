@@ -12,7 +12,7 @@
       <span class="logo">⚖️</span>
       <div>
         <h1>匿名评审分配系统</h1>
-        <p class="subtitle">最小费用最大流 · 冲突硬约束 · 主题匹配与负载均衡联合优化</p>
+        <p class="subtitle">最小费用最大流 · 冲突硬约束 · 机构多样性上限 · 主题匹配与负载均衡联合优化</p>
       </div>
     </div>
     <div class="actions">
@@ -65,9 +65,12 @@
           <label>负载偏差权重 α
             <input type="number" id="set-alpha" min="0" />
           </label>
+          <label>每稿同机构最多人数（0 = 关闭）
+            <input type="number" id="set-max-inst" min="0" max="20" />
+          </label>
           <div class="settings-actions">
             <button id="btn-save-settings" class="btn">保存设置</button>
-            <span class="hint">权重修改后请点击“重新求解分配”生效。</span>
+            <span class="hint">权重修改后请点击“重新求解分配”生效。无机构评审人不受该上限约束。</span>
           </div>
         </div>
       </details>
@@ -97,6 +100,7 @@
         <form id="form-reviewer" class="form-row">
           <input type="text" name="name" placeholder="评审人姓名 / 代号" required maxlength="100" />
           <input type="text" name="topics" placeholder="擅长主题（逗号分隔）" />
+          <input type="text" name="institution" placeholder="机构（可选，留空不计入机构上限）" maxlength="100" />
           <input type="number" name="capacity" placeholder="个人容量" min="0" max="50" />
           <button class="btn primary" type="submit">添加评审人</button>
         </form>

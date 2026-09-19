@@ -108,24 +108,28 @@ function renderAlerts() {
 
   $("#unmet-box").innerHTML = sol.unmet.map((u) => {
     const detailRows = u.details.candidates
-      .map((c) => `<tr>
-          <td>${esc(c.name)}</td>
+      .map((c) => `<tr class="${c.institution_blocked ? "row-blocked" : ""}">
+          <td>${esc(c.name)}${c.institution ? ` <span class="tag inst-tag">${esc(c.institution)}</span>` : '<span class="hint">无机构</span>'}</td>
           <td>${c.remaining_capacity > 0
             ? `剩余容量 ${c.remaining_capacity}`
             : '<span style="color:#c63b3b">容量已满</span>'}</td>
           <td>${c.uncovered_topics === 0
             ? '<span style="color:#178a52">主题全覆盖</span>'
             : `未覆盖主题 ${c.uncovered_topics} 个`}</td>
+          <td>${c.institution_blocked
+            ? '<span style="color:#9a6700">机构名额已满，被机构上限排除</span>'
+            : "可参与"}</td>
         </tr>`).join("");
     return `<div class="alert danger">
       <strong>⛔ 《${esc(u.title)}》未满足：需要 ${u.required} 名评审，仅安排 ${u.assigned} 名，缺 ${u.deficit} 名。</strong>
       <ul>${u.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>
       <div class="reason-detail">
         <strong>可复核明细</strong>（共 ${u.details.reviewer_count} 名评审，
-        冲突排除 ${u.details.blocked_by_conflict} 名，其余剩余容量合计
+        冲突排除 ${u.details.blocked_by_conflict} 名，
+        机构上限排除 ${u.details.blocked_by_institution || 0} 名，其余剩余容量合计
         ${u.details.candidate_remaining_capacity}）
         <table>
-          <tr><th>评审人</th><th>剩余容量</th><th>主题匹配</th></tr>
+          <tr><th>评审人</th><th>剩余容量</th><th>主题匹配</th><th>机构名额</th></tr>
           ${detailRows}
         </table>
       </div>
@@ -157,6 +161,7 @@ function renderAssignments() {
         const costTxt = ci ? `费用 ${ci.mismatch_cost + ci.load_cost}` : "锁定";
         return `<span class="chip ${a.locked ? "locked" : ""} ${ci && ci.uncovered_topics.length ? "miss-penalty" : ""}">
           ${a.locked ? "🔒" : "👤"} ${esc(r ? r.name : `#${a.reviewer_id}`)}
+          ${r && r.institution ? `<span class="tag inst-tag">${esc(r.institution)}</span>` : ""}
           <span class="cost">${costTxt}</span>
           ${miss}
           <button title="${a.locked ? "解锁并重新求解" : "锁定该既有分配并重新求解"}"
@@ -179,6 +184,8 @@ function renderAssignments() {
         </div>`
       : "";
 
+    const instCompose = renderInstComposition(m.id, assigns);
+
     return `<div class="assignment-card ${short ? "short" : "satisfied"}">
       <div class="assignment-head">
         <div>
@@ -188,9 +195,34 @@ function renderAssignments() {
         <span class="badge-count ${short ? "no" : "ok"}">${assigns.length} / ${m.required_reviews} 名评审</span>
       </div>
       <div class="reviewer-chips">${chips || '<span class="hint">尚未分配</span>'}</div>
+      ${instCompose}
       ${manualLock}
     </div>`;
   }).join("");
+}
+
+function renderInstComposition(mId, assigns) {
+  const limit = state.settings.max_same_institution;
+  const comp = state.solution?.institution_composition?.[String(mId)];
+  if (!comp || !comp.length) return "";
+  const named = comp.filter((g) => g.institution);
+  if (!limit && !named.length) return "";
+  const head = limit
+    ? `本稿机构构成（同机构最多 ${limit} 人${limit ? "，锁定先占名额" : ""}）：`
+    : "本稿机构构成（机构上限已关闭）：";
+  const groups = comp.map((g) => {
+    const cls = g.over_limit ? "over" : g.at_limit ? "at" : "";
+    const name = g.institution ? esc(g.institution) : "无机构";
+    const suffix = g.over_limit
+      ? ` <span class="inst-flag over">已超限（历史锁定保留）</span>`
+      : g.at_limit
+        ? ` <span class="inst-flag at">已达上限</span>`
+        : "";
+    const reviewers = g.reviewers.map(esc).join("、");
+    return `<span class="inst-chip ${cls}" title="${reviewers}">${name}：${g.count} 人` +
+      (g.locked_count ? `（锁 ${g.locked_count}）` : "") + `${suffix}</span>`;
+  }).join("");
+  return `<div class="inst-compose"><span class="hint">${head}</span> ${groups}</div>`;
 }
 
 function renderReviewerLoad() {
@@ -204,7 +236,9 @@ function renderReviewerLoad() {
     const over = load > r.capacity;
     return `<div class="load-row">
       <div class="load-name">${esc(r.name)}
-        <div class="entity-sub" style="width:130px">${r.topics.slice(0, 2).map(esc).join(" / ") || ""}</div>
+        <div class="entity-sub" style="width:130px">${
+          (r.institution ? esc(r.institution) + (r.topics.length ? " · " : "") : "") +
+          r.topics.slice(0, 2).map(esc).join(" / ")}</div>
       </div>
       <div class="load-bar-wrap ${over ? "over" : ""}">
         <div class="load-bar ${over ? "over" : ""}" style="width:${pct}%"></div>
@@ -256,6 +290,7 @@ function renderReviewers() {
         </div>
         <div class="entity-sub">
           容量 ${r.capacity} · 已安排 ${r.assigned || 0}${r.assigned > r.capacity ? " <b style='color:var(--red)'>(超容)</b>" : ""} ·
+          机构：${r.institution ? `<span class="tag inst-tag">${esc(r.institution)}</span>` : '<span class="hint">（未填写，不计入机构上限）</span>'} ·
           擅长：${r.topics.map((t) => `<span class="tag">${esc(t)}</span>`).join("") || "（未标注）"}
         </div>
       </div>
@@ -299,6 +334,7 @@ function renderSettings() {
   $("#set-default-cap").value = state.settings.default_capacity;
   $("#set-beta").value = state.settings.mismatch_weight;
   $("#set-alpha").value = state.settings.load_weight;
+  $("#set-max-inst").value = state.settings.max_same_institution ?? 0;
 }
 
 function render() {
@@ -396,11 +432,13 @@ function bindEvents() {
     e.preventDefault();
     const f = e.target;
     const cap = f.capacity.value.trim();
+    const institution = f.institution.value.trim();
     await runAction(api("/api/reviewers", {
       method: "POST",
       body: JSON.stringify({
         name: f.name.value,
         topics: f.topics.value,
+        institution: institution || null,
         capacity: cap ? Number(cap) : state.settings.default_capacity,
       }),
     }), "评审人已添加");
@@ -438,6 +476,7 @@ function bindEvents() {
       openModal("编辑评审人", [
         { key: "name", label: "姓名/代号", value: r.name },
         { key: "topics", label: "擅长主题（逗号分隔）", value: r.topics.join(", ") },
+        { key: "institution", label: "机构（可清空，留空不计入机构上限）", value: r.institution || "" },
         { key: "capacity", label: "个人容量", value: r.capacity, type: "number", min: 0, max: 50 },
       ], async (v) => {
         if (!v.name.trim()) throw new Error("姓名不能为空");
@@ -501,6 +540,7 @@ function bindEvents() {
         default_capacity: Number($("#set-default-cap").value),
         mismatch_weight: Number($("#set-beta").value),
         load_weight: Number($("#set-alpha").value),
+        max_same_institution: Number($("#set-max-inst").value),
       }),
     }), "设置已保存（点击“重新求解分配”可按新权重计算）");
   });

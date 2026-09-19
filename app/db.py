@@ -18,8 +18,17 @@ DEFAULTS = {
     "default_capacity": 3,           # 新建评审人默认个人容量
     "mismatch_weight": 10,           # 主题不匹配单位费用
     "load_weight": 2,                # 负载边际递增单位费用
+    "max_same_institution": 0,       # 每篇稿件同机构评审人上限（0 = 关闭机构多样性约束）
     "last_solution": None,           # 最近一次求解结果（JSON）
 }
+
+INT_SETTINGS = (
+    "default_required_reviews",
+    "default_capacity",
+    "mismatch_weight",
+    "load_weight",
+    "max_same_institution",
+)
 
 
 def _connect() -> sqlite3.Connection:
@@ -62,10 +71,11 @@ CREATE TABLE IF NOT EXISTS manuscripts (
 );
 
 CREATE TABLE IF NOT EXISTS reviewers (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    name     TEXT NOT NULL,
-    topics   TEXT NOT NULL DEFAULT '[]',
-    capacity INTEGER NOT NULL DEFAULT 3
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    topics      TEXT NOT NULL DEFAULT '[]',
+    capacity    INTEGER NOT NULL DEFAULT 3,
+    institution TEXT
 );
 
 -- 作者冲突：稿件 m_id 与评审人 r_id 之间绝不允许出现分配边
@@ -86,12 +96,23 @@ CREATE TABLE IF NOT EXISTS assignments (
 """
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """对旧版本数据库做幂等迁移，保留既有数据。
+
+    v2：reviewers 增加可空机构列 institution（机构多样性约束依赖该列）。
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(reviewers)")}
+    if "institution" not in cols:
+        conn.execute("ALTER TABLE reviewers ADD COLUMN institution TEXT")
+
+
 def init_db(seed_demo: bool = True) -> None:
     """建库建表、写入默认设置；空库时可选择载入演示数据。"""
     os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
     conn = _connect()
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         for key, value in DEFAULTS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
@@ -109,7 +130,7 @@ def get_setting(conn: sqlite3.Connection, key: str) -> Any:
     row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     if row is None or row["value"] is None:
         return DEFAULTS.get(key)
-    if key in ("default_required_reviews", "default_capacity", "mismatch_weight", "load_weight"):
+    if key in INT_SETTINGS:
         return int(row["value"])
     if key == "last_solution":
         return json.loads(row["value"])
@@ -142,6 +163,14 @@ def normalize_topics(raw: str | list[str]) -> list[str]:
     return result
 
 
+def normalize_institution(raw: str | None) -> str | None:
+    """规范化机构名：去除首尾与内部多余空白；空字符串视为未填写（None，不计入机构上限）。"""
+    if raw is None:
+        return None
+    name = " ".join(raw.split())
+    return name or None
+
+
 def seed_demo_data(conn: sqlite3.Connection) -> None:
     """载入一组用于快速体验的演示数据（含一个容量不足样例）。"""
     ms = [
@@ -152,16 +181,17 @@ def seed_demo_data(conn: sqlite3.Connection) -> None:
         ("大模型安全对齐", ["nlp", "安全"], 3),
     ]
     rs = [
-        ("张教授", ["机器学习", "nlp"], 3),
-        ("李研究员", ["nlp", "安全"], 3),
+        ("张教授", ["机器学习", "nlp"], 3, "A大学"),
+        ("李研究员", ["nlp", "安全"], 3, "A大学"),
         # 王老师只擅长数据库（不含“分布式系统”），且与 M4 冲突：
         # 于是 M4（体系结构/分布式系统）只有钱教授 1 名相容评审，
         # 钱教授容量仅 2、需求 3 -> M4 必然缺 1 名，演示“未满足稿件与原因”。
-        ("王老师", ["数据库"], 3),
-        ("赵博士", ["推荐系统", "机器学习"], 2),
-        ("钱教授", ["体系结构", "分布式系统"], 3),
-        # 孙老师容量 0：全部容量之和 14 < 需求之和 15，形成全局性容量不足
-        ("孙老师", ["安全"], 0),
+        ("王老师", ["数据库"], 3, "B研究院"),
+        ("赵博士", ["推荐系统", "机器学习"], 2, "A大学"),
+        ("钱教授", ["体系结构", "分布式系统"], 3, "C实验室"),
+        # 孙老师容量 0：全部容量之和 14 < 需求之和 15，形成全局性容量不足；
+        # 不填机构：无机构评审人不参与同机构人数限制。
+        ("孙老师", ["安全"], 0, None),
     ]
     with transaction(conn):
         # 若在已有库上重新载入演示数据，重置自增序列，保证下面的 ID 引用确定。
@@ -174,10 +204,10 @@ def seed_demo_data(conn: sqlite3.Connection) -> None:
             )
             m_ids.append(cur.lastrowid)
         r_ids: list[int] = []
-        for name, topics, cap in rs:
+        for name, topics, cap, institution in rs:
             cur = conn.execute(
-                "INSERT INTO reviewers(name, topics, capacity) VALUES (?, ?, ?)",
-                (name, json.dumps(topics, ensure_ascii=False), cap),
+                "INSERT INTO reviewers(name, topics, capacity, institution) VALUES (?, ?, ?, ?)",
+                (name, json.dumps(topics, ensure_ascii=False), cap, institution),
             )
             r_ids.append(cur.lastrowid)
         # M4（体系结构/分布式）与除钱教授外的所有评审人冲突，
