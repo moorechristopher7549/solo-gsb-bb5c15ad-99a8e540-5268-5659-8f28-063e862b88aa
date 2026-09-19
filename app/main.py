@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db
-from .db import get_conn, get_setting, normalize_topics, seed_demo_data, set_setting, transaction
+from .db import get_conn, get_setting, normalize_institution, normalize_topics, seed_demo_data, set_setting, transaction
 from .schemas import (
     ConflictIn,
     LockIn,
@@ -25,7 +25,7 @@ from .schemas import (
     ReviewerPatch,
     SettingsIn,
 )
-from .solver import solve
+from .solver import institution_lock_exceeds, solve
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -53,7 +53,8 @@ def build_state(conn: sqlite3.Connection) -> dict:
     def load_reviewers():
         return [
             {"id": r["id"], "name": r["name"],
-             "topics": json.loads(r["topics"]), "capacity": r["capacity"]}
+             "topics": json.loads(r["topics"]), "capacity": r["capacity"],
+             "institution": r["institution"] or ""}
             for r in conn.execute("SELECT * FROM reviewers ORDER BY id").fetchall()
         ]
 
@@ -95,6 +96,7 @@ def build_state(conn: sqlite3.Connection) -> dict:
             "default_capacity": get_setting(conn, "default_capacity"),
             "mismatch_weight": get_setting(conn, "mismatch_weight"),
             "load_weight": get_setting(conn, "load_weight"),
+            "institution_cap": get_setting(conn, "institution_cap"),
         },
         "manuscripts": ms_list,
         "reviewers": rv_list,
@@ -163,10 +165,11 @@ def delete_manuscript(m_id: int, conn=Depends(get_conn)):
 def create_reviewer(body: ReviewerIn, conn=Depends(get_conn)):
     with transaction(conn):
         cur = conn.execute(
-            "INSERT INTO reviewers(name, topics, capacity) VALUES (?, ?, ?)",
+            "INSERT INTO reviewers(name, topics, capacity, institution) VALUES (?, ?, ?, ?)",
             (body.name.strip(),
              json.dumps(normalize_topics(body.topics), ensure_ascii=False),
-             body.capacity),
+             body.capacity,
+             normalize_institution(body.institution)),
         )
     return build_state(conn) | {"created_id": cur.lastrowid}
 
@@ -184,6 +187,9 @@ def update_reviewer(r_id: int, body: ReviewerPatch, conn=Depends(get_conn)):
     if body.capacity is not None:
         fields.append("capacity = ?")
         params.append(body.capacity)
+    if body.institution is not None:
+        fields.append("institution = ?")
+        params.append(normalize_institution(body.institution))
     if not fields:
         raise HTTPException(status_code=400, detail="没有需要更新的字段")
     params.append(r_id)
@@ -280,6 +286,29 @@ def toggle_lock(body: LockIn, conn=Depends(get_conn)):
                 detail=f"该稿件最多需要 {req} 名评审，已锁定 {locked_n} 人，"
                        f"再锁定一名新评审人将超出需求；请先解锁一把锁。",
             )
+        # 机构多样性硬约束：新增锁定会使该稿同机构人数超过上限时以 409 拒绝。
+        institution = conn.execute(
+            "SELECT COALESCE(institution, '') AS institution FROM reviewers WHERE id = ?",
+            (body.reviewer_id,),
+        ).fetchone()["institution"]
+        org_cap = int(get_setting(conn, "institution_cap"))
+        if institution and existing is None and org_cap > 0:
+            same_inst_locked = conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM assignments a JOIN reviewers rv ON a.r_id = rv.id
+                WHERE a.m_id = ? AND a.locked = 1
+                  AND COALESCE(rv.institution, '') = ?
+                """,
+                (body.manuscript_id, institution),
+            ).fetchone()["c"]
+            if institution_lock_exceeds(org_cap, same_inst_locked, True):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"该稿件来自「{institution}」的锁定评审已有 {same_inst_locked} 人，"
+                           f"再锁定将超过每篇同机构最多 {org_cap} 人的限制；"
+                           f"请先解锁一名该机构的锁定，或在设置中放宽上限。",
+                )
         with transaction(conn):
             conn.execute(
                 "INSERT INTO assignments(m_id, r_id, locked) VALUES (?, ?, 1) "

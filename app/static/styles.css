@@ -124,6 +124,19 @@ input:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px v
 }
 .tag.miss { background: #f1e6fd; color: #7d2eb8; }
 .tag.locked-tag { background: #fff3d6; color: var(--amber); }
+.tag.inst { background: #e6f4f1; color: #0e6b5b; }
+
+/* ---------------- 机构构成 ---------------- */
+.composition {
+  margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+}
+.inst-chip {
+  display: inline-block; background: #f1f8f6; color: #0e6b5b; border: 1px solid #cde8e1;
+  border-radius: 20px; padding: 2px 10px; font-size: 12px;
+}
+.inst-chip.over { background: var(--red-soft); color: var(--red); border-color: #f0c0c0; }
+.excl { color: var(--red); font-weight: 600; }
+tr.row-blocked td { opacity: .62; background: rgba(198,59,59,.05); }
 
 /* ---------------- 分配结果 ---------------- */
 .assignment-card {
